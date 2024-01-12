@@ -470,3 +470,107 @@ class ParallelLinearGaussianSSM(LinearGaussianSSM):
                    smoothed["smoothed_means"],
                    smoothed["smoothed_covariances"],
                    smoothed_cross)
+
+class DeepAutoregressiveDynamics:
+
+    def __init__(self, network, params):
+        self.cell = network
+        self.params = params["network_params"]
+        self.inputs = params["network_input"]
+        # self.input_dummy = params["network_params"]["input_dummy"]
+        # self.latent_dummy = params["network_params"]["latent_dummy"]
+        # self.output_dummy = params["network_params"]["output_dummy"]
+        self._mean = None
+        self._covariance = None
+
+    @property
+    def mean(self):
+        if (self._mean is None):
+            self.compute_mean_and_cov()
+        return self._mean
+
+    @property
+    def covariance(self):
+        if (self._covariance is None):
+            self.compute_mean_and_cov()
+        return self._covariance
+
+    @property
+    def filtered_covariances(self):
+        return self.covariance()
+
+    @property
+    def filtered_means(self):
+        return self.mean()
+        
+    def compute_mean_and_cov(self):
+        num_samples = 25
+        samples = self.sample((num_samples,), key_0)
+        Ex = np.mean(samples, axis=0)
+        self._mean = Ex
+        ExxT = np.einsum("s...ti,s...tj->s...tij", samples, samples).mean(axis=0)
+        self._covariance = ExxT - np.einsum("...ti,...tj->...tij", Ex, Ex)
+
+    # TODO: make this work properly with a batched distribution object
+    def log_prob(self, xs):
+        params = self.params
+        def log_prob_single(x_):
+            def _log_prob_step(carry, i):
+                h, prev_x = carry
+                x, u = x_[i], self.inputs[i]
+                h, (cov, mean) = self.cell.apply(params["rnn_params"], h, prev_x, u)
+                pred_dist = tfd.MultivariateNormalFullCovariance(loc=mean, 
+                                                            covariance_matrix=cov)
+                log_prob = pred_dist.log_prob(x)
+                carry = h, x
+                return carry, log_prob
+            # Assuming these are zero arrays already
+            init = (params["latent_dummy"], params["output_dummy"])
+            _, log_probs = scan(_log_prob_step, init, np.arange(x_.shape[0]))
+            return np.sum(log_probs, axis=0)
+        return vmap(log_prob_single)(xs)
+
+    # TODO: make this work with a batched distribution object
+    # Only supports rank 0 and 1 sample shapes
+    # Output: ([num_samples,] [batch_size,] seq_len, event_dim)
+    def sample(self, sample_shape, seed):
+        def _sample_single(key, params, inputs):
+            def _sample_step(carry, u):
+                key, h, x = carry
+                key, new_key = jr.split(key)
+                h, (cov, mean) = self.cell.apply(params["rnn_params"], h, x, u)
+                sample = jr.multivariate_normal(key, mean, cov)
+                carry = new_key, h, sample
+                output = sample
+                return carry, output
+
+            init = (key, params["latent_dummy"], params["output_dummy"])
+            _, sample = scan(_sample_step, init, inputs)
+            return sample
+
+        if (len(self.inputs.shape) == 2):
+            if (len(sample_shape) == 0):
+                return _sample_single(seed, self.params, self.inputs)
+            else:
+                assert (len(sample_shape) == 1)
+                return vmap(_sample_single, in_axes=(0, None, None))(jr.split(seed, sample_shape[0]),
+                                            self.params, self.inputs)
+        else:
+            # This is a batched distribution object
+            assert(len(self.inputs.shape) == 3)
+            batch_size = self.inputs.shape[0]
+            if (len(sample_shape) == 0):
+                return vmap(_sample_single)(
+                            jr.split(seed, batch_size), 
+                            self.params,
+                            self.inputs
+                        )
+            else:
+                assert (len(sample_shape) == 1)
+                return vmap(
+                        lambda s:vmap(_sample_single)(
+                            jr.split(s, batch_size), 
+                            self.params,
+                            self.inputs
+                        )
+                    )(jr.split(seed, sample_shape[0]))
