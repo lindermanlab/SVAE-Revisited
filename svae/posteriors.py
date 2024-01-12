@@ -4,7 +4,7 @@ from jax import random as jr
 import copy
 
 from svae.priors import SVAEPrior, LinearGaussianChainPrior
-from svae.distributions import ParallelLinearGaussianSSM, LinearGaussianSSM, LinearGaussianChain
+from svae.distributions import ParallelLinearGaussianSSM, LinearGaussianSSM, LinearGaussianChain, DeepAutoregressiveDynamics
 from svae.utils import random_rotation
 
 class LDSSVAEPosterior(SVAEPrior):
